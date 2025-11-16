@@ -1,4 +1,6 @@
 g++ resolver.cpp -o resolver.exe -lws2_32
+After 3rd commit
+g++ resolver.cpp -o resolver.exe -lws2_32 -ldnsapi
 
 Your program  
   → getaddrinfo()
@@ -145,3 +147,10 @@ Used because cloud services change server IPs frequently
 www works because you added CNAME for www
 
 root domain doesn’t work because it needs an A/AAAA record, not CNAME
+
+
+👍 Summary
+Question	Answer
+Why does --raw take 3 args?	Because we specify the domain and the DNS server to ask.
+What is 1.1.1.1?	Cloudflare's public DNS server.
+Why specify DNS server?	To test, debug, compare, bypass filters, or avoid cache.

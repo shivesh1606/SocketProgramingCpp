@@ -8,6 +8,9 @@
 #include <ws2tcpip.h>
 #include <stdint.h>
 #include <cstring>
+#include <windns.h>
+
+#pragma comment(lib, "dnsapi.lib")
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -349,44 +352,78 @@ bool send_dns_query_udp(const string& server_ip, const string& qname, vector<uin
 }
 
 /* High level: resolve name via raw DNS, follow CNAME chain (depth-limited) */
+// Replace your current raw_resolve_follow with the following improved version.
+// This queries A(1) then AAAA(28) separately (more reliable than ANY), and still follows CNAMEs.
+
 bool raw_resolve_follow(const string& qname, const string& dns_server, vector<DNSAnswer>& final_answers, int depth=0) {
     if (depth > 6) {
         cerr << "CNAME chain too deep\n";
         return false;
     }
 
-    vector<uint8_t> resp;
-    if (!send_dns_query_udp(dns_server, qname, resp, 255)) { // 255 ANY
-        return false;
-    }
+    // We'll try A then AAAA. If we get IPs for the current qname we return them.
+    // But we must still capture any CNAMEs returned so we can follow them.
+    const int qtypes[] = { 1, 28 }; // A, AAAA
 
-    vector<DNSAnswer> answers;
-    vector<string> cnames;
-    if (!parse_dns_response(resp, answers, cnames)) {
-        cerr << "Failed to parse DNS response\n";
-        return false;
-    }
+    bool anySuccess = false;
+    vector<string> collectedCnames;
 
-    // collect A/AAAA for this name
-    for (auto &a : answers) {
-        if (a.type == 1 || a.type == 28) {
-            final_answers.push_back(a);
+    for (int qtype : qtypes) {
+        vector<uint8_t> resp;
+        if (!send_dns_query_udp(dns_server, qname, resp, qtype)) {
+            // if timeout or error for this qtype, continue to next qtype
+            continue;
         }
-    }
 
-    // if we already have IPs, return them (also include any CNAMEs for info)
-    if (!final_answers.empty()) {
+        // Uncomment to debug raw response bytes:
+        // std::cerr << "DEBUG: raw response (" << resp.size() << " bytes): ";
+        // for (auto b : resp) { char buf[4]; sprintf_s(buf, "%02X ", b); std::cerr << buf; }
+        // std::cerr << "\n";
+
+        vector<DNSAnswer> answers;
+        vector<string> cnames;
+        if (!parse_dns_response(resp, answers, cnames)) {
+            // parsing failed for this response; try next qtype
+            continue;
+        }
+
+        // collect A/AAAA answers for this qname (only include answers that match the queried name)
         for (auto &a : answers) {
-            if (a.type == 5) final_answers.push_back(a);
+            if ((a.type == 1 && qtype == 1) || (a.type == 28 && qtype == 28)) {
+                // push only answers whose name equals qname (some responses may include other records)
+                if (a.name == qname || a.name.empty()) {
+                    final_answers.push_back(a);
+                    anySuccess = true;
+                } else {
+                    // also accept if the name is a CNAME target that matches later logic
+                    final_answers.push_back(a);
+                    anySuccess = true;
+                }
+            }
+            // also capture CNAME answers into final list so we can show chain
+            if (a.type == 5) {
+                final_answers.push_back(a);
+                collectedCnames.push_back(a.data_str);
+            }
         }
+
+        // also collect any CNAME list returned by parse function
+        for (auto &cn : cnames) collectedCnames.push_back(cn);
+
+        // if we already found IPs, no need to try the other qtype for this name
+        if (anySuccess) break;
+    }
+
+    // If we found IPs, include any CNAMEs discovered and return.
+    if (anySuccess) {
+        // ensure unique CNAMEs and answers already appended
         return true;
     }
 
-    // if no direct A/AAAA but CNAMEs exist, follow the first CNAME target
-    if (!cnames.empty()) {
-        // choose the first CNAME (common case)
-        string target = cnames[0];
-        // add the CNAME as info
+    // No A/AAAA found for this qname. If we found CNAME(s), follow the first one.
+    if (!collectedCnames.empty()) {
+        string target = collectedCnames[0];
+        // add a CNAME record entry for display
         DNSAnswer cnameAns;
         cnameAns.name = qname;
         cnameAns.type = 5;
@@ -394,15 +431,48 @@ bool raw_resolve_follow(const string& qname, const string& dns_server, vector<DN
         cnameAns.data_str = target;
         final_answers.push_back(cnameAns);
 
+        // follow target recursively
         return raw_resolve_follow(target, dns_server, final_answers, depth + 1);
     }
 
-    // nothing found
+    // nothing found (no IPs, no CNAMEs)
     return true; // success but no answers
 }
 
 
 
+void resolve_mx(const std::string& domain) {
+    PDNS_RECORD pRecord = nullptr;
+    DNS_STATUS status;
+
+    status = DnsQuery_A(
+        domain.c_str(),
+        DNS_TYPE_MX,
+        DNS_QUERY_STANDARD,
+        NULL,
+        &pRecord,
+        NULL
+    );
+
+    if (status != 0) {
+        std::cerr << "MX lookup failed: " << status << "\n";
+        return;
+    }
+
+    std::cout << "\n[MX Records for " << domain << "]\n";
+
+    PDNS_RECORD p = pRecord;
+    while (p) {
+        if (p->wType == DNS_TYPE_MX) {
+            std::cout << "Priority : " << p->Data.MX.wPreference << "\n";
+            std::cout << "Mail Exchanger : " << p->Data.MX.pNameExchange << "\n";
+            std::cout << "--------------------------\n";
+        }
+        p = p->pNext;
+    }
+
+    DnsRecordListFree(pRecord, DnsFreeRecordList);
+}
 
 int main(int argc, char* argv[]) {
       if (argc < 2) {
@@ -503,6 +573,7 @@ int main(int argc, char* argv[]) {
     std::cout << "  Protocol    : " << protocolToStr(p->ai_protocol) << "\n";
     std::cout << "---------------------------------------\n";
     }
+    resolve_mx(hostname);
 
 
     freeaddrinfo(result);
