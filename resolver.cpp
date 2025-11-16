@@ -12,6 +12,26 @@ using std::cout;
 using std::cerr;
 using std::endl;
 
+std::string familyToStr(int family) {
+    if (family == AF_INET) return "IPv4";
+    if (family == AF_INET6) return "IPv6";
+    return "Unknown";
+}
+
+std::string sockTypeToStr(int type) {
+    if (type == SOCK_STREAM) return "Stream (TCP)";
+    if (type == SOCK_DGRAM) return "Datagram (UDP)";
+    if (type == SOCK_RAW) return "Raw Socket";
+    return "Other";
+}
+
+std::string protocolToStr(int proto) {
+    if (proto == IPPROTO_TCP) return "TCP";
+    if (proto == IPPROTO_UDP) return "UDP";
+    if (proto == IPPROTO_ICMP) return "ICMP";
+    if (proto == IPPROTO_ICMPV6) return "ICMPv6";
+    return "Other";
+}
 
 void print_usage() {
     cout << "Usage:\n";
@@ -102,19 +122,24 @@ int main(int argc, char* argv[]) {
 
     cout << "Results for: " << hostname << "\n";
 
-    for (addrinfo *p = result; p != NULL; p = p->ai_next) {
-        char ipstr[INET6_ADDRSTRLEN] = {0};
+   for (addrinfo* p = result; p != NULL; p = p->ai_next) {
+    char ipStr[INET6_ADDRSTRLEN];
 
-        if (p->ai_family == AF_INET) {
-            sockaddr_in *ipv4 = (sockaddr_in*)p->ai_addr;
-            inet_ntop(AF_INET, &(ipv4->sin_addr), ipstr, sizeof(ipstr));
-            cout << "IPv4: " << ipstr << "\n";
-        } else if (p->ai_family == AF_INET6) {
-            sockaddr_in6 *ipv6 = (sockaddr_in6*)p->ai_addr;
-            inet_ntop(AF_INET6, &(ipv6->sin6_addr), ipstr, sizeof(ipstr));
-            cout << "IPv6: " << ipstr << "\n";
-        }
+    void* addr;
+    if (p->ai_family == AF_INET) {
+        addr = &((sockaddr_in*)p->ai_addr)->sin_addr;
+    } else {
+        addr = &((sockaddr_in6*)p->ai_addr)->sin6_addr;
     }
+
+    inet_ntop(p->ai_family, addr, ipStr, sizeof(ipStr));
+
+    std::cout << familyToStr(p->ai_family) << ": " << ipStr << "\n";
+    std::cout << "  Socket Type : " << sockTypeToStr(p->ai_socktype) << "\n";
+    std::cout << "  Protocol    : " << protocolToStr(p->ai_protocol) << "\n";
+    std::cout << "---------------------------------------\n";
+    }
+
 
     freeaddrinfo(result);
     WSACleanup();
