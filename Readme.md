@@ -100,3 +100,48 @@ Your OPERATING SYSTEM knows:
 “Ping = raw ICMP”
 
 And based on these rules, OS gives you the right connection recipe.
+
+CNAME Resolution (Canonical Name)
+
+When you visit:
+
+www.youtube.com
+
+
+The DNS server may internally map it to another domain:
+
+youtube-ui.l.google.com
+
+
+This "true" domain is called the canonical name (CNAME).
+
+Your resolver can print this using:
+
+AI_CANONNAME flag
+
+reading ai_canonname field
+
+
+Important:
+Out existing code uses getaddrinfo() → this already handles CNAME internally, so you never actually see the CNAME.
+So we need to use Raw Dns query function
+
+
+🚀 6. So what purpose does CNAME solve?
+✔ Makes domain point to a dynamic backend
+✔ Allows cloud providers to rotate IPs
+✔ Lets you use CDNs easily
+✔ Lets you “alias” your domain to another
+✔ Reduces maintenance
+✔ Allows www to stay stable forever
+
+
+🏁 Summary in 4 Lines
+
+CNAME = nickname → tells DNS to look at another domain for the real location
+
+Used because cloud services change server IPs frequently
+
+www works because you added CNAME for www
+
+root domain doesn’t work because it needs an A/AAAA record, not CNAME

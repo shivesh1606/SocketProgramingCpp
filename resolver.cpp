@@ -2,8 +2,12 @@
 
 #include <iostream>
 #include <string>
+#include <vector>
+#include <map>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <stdint.h>
+#include <cstring>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -11,7 +15,10 @@ using std::string;
 using std::cout;
 using std::cerr;
 using std::endl;
+using std::vector;
+using std::map;
 
+/* ---------- Utility helpers ---------- */
 std::string familyToStr(int family) {
     if (family == AF_INET) return "IPv4";
     if (family == AF_INET6) return "IPv6";
@@ -37,7 +44,14 @@ void print_usage() {
     cout << "Usage:\n";
     cout << "  resolver <hostname>\n";
     cout << "  resolver --reverse <ip>\n";
+    cout << "  resolver --raw <hostname> [dns-server]\n";
+    cout << "\nExamples:\n";
+    cout << "  resolver google.com\n";
+    cout << "  resolver --reverse 8.8.8.8\n";
+    cout << "  resolver --raw google.com 1.1.1.1\n";
 }
+
+/* ---------- Reverse lookup ---------- */
 void do_reverse_lookup(const std::string& ip_address) {
 
     sockaddr_in sa{};
@@ -76,6 +90,320 @@ void do_reverse_lookup(const std::string& ip_address) {
     cout << "Reverse lookup for " << ip_address << " -> " << host << "\n";
 
 }
+
+
+/* ---------- Raw DNS client: packet building & parsing ---------- */
+
+/* DNS header structure (12 bytes) */
+#pragma pack(push, 1)
+struct DNSHeader {
+    uint16_t id;
+    uint16_t flags;
+    uint16_t qdcount;
+    uint16_t ancount;
+    uint16_t nscount;
+    uint16_t arcount;
+};
+#pragma pack(pop)
+
+/* Helper: write 16-bit/32-bit in network byte order */
+void write_u16(vector<uint8_t>& buf, uint16_t v) {
+    buf.push_back((v >> 8) & 0xFF);
+    buf.push_back(v & 0xFF);
+}
+void write_u32(vector<uint8_t>& buf, uint32_t v) {
+    buf.push_back((v >> 24) & 0xFF);
+    buf.push_back((v >> 16) & 0xFF);
+    buf.push_back((v >> 8) & 0xFF);
+    buf.push_back(v & 0xFF);
+}
+
+/* Build a simple DNS query for type A (1) or AAAA (28) or ANY (255).
+   We'll query type 255 (ANY) to get A/AAAA/CNAME in one shot. */
+vector<uint8_t> build_dns_query(const string& name, uint16_t qtype, uint16_t id) {
+    vector<uint8_t> out;
+    DNSHeader hdr;
+    hdr.id = htons(id);
+    hdr.flags = htons(0x0100); // recursion desired
+    hdr.qdcount = htons(1);
+    hdr.ancount = 0;
+    hdr.nscount = 0;
+    hdr.arcount = 0;
+
+    // header
+    out.resize(sizeof(DNSHeader));
+    memcpy(out.data(), &hdr, sizeof(DNSHeader));
+
+    // question: name in label format
+    size_t start = out.size();
+    size_t pos = 0;
+    while (pos < name.size()) {
+        size_t dot = name.find('.', pos);
+        if (dot == string::npos) dot = name.size();
+        size_t len = dot - pos;
+        out.push_back((uint8_t)len);
+        for (size_t i = 0; i < len; ++i) out.push_back(name[pos + i]);
+        pos = dot + 1;
+    }
+    out.push_back(0x00); // null label terminator
+
+    // qtype & qclass (IN)
+    write_u16(out, qtype);
+    write_u16(out, 1); // class IN
+
+    return out;
+}
+
+/* Name decoding with compression support.
+   buffer: pointer to DNS message
+   bufsize: total size
+   offset: current offset (will be advanced for non-pointer reads)
+   returns: decoded name, and optionally advances local_offset (but not in pointer cases)
+*/
+string decode_name(const uint8_t* buffer, size_t bufsize, size_t& offset) {
+    string name;
+    bool jumped = false;
+    size_t orig_offset = offset;
+    size_t jumps = 0;
+    while (offset < bufsize) {
+        uint8_t len = buffer[offset];
+        if (len == 0) {
+            if (!jumped) offset += 1;
+            break;
+        }
+
+        // pointer? top two bits 11
+        if ((len & 0xC0) == 0xC0) {
+            if (offset + 1 >= bufsize) return "";
+            uint8_t b2 = buffer[offset + 1];
+            uint16_t pointer = ((len & 0x3F) << 8) | b2;
+            if (!jumped) orig_offset = offset + 2;
+            offset = pointer;
+            jumped = true;
+            if (++jumps > 10) return ""; // avoid loops
+            continue;
+        } else {
+            // normal label
+            offset++;
+            if (offset + len > bufsize) return "";
+            if (!name.empty()) name += '.';
+            for (int i = 0; i < len; ++i) {
+                name.push_back((char)buffer[offset + i]);
+            }
+            offset += len;
+        }
+    }
+
+    if (jumped) {
+        // if we jumped, return the original advancement
+        offset = orig_offset;
+    }
+    return name;
+}
+
+/* Parse answers: supports A, AAAA, CNAME */
+struct DNSAnswer {
+    string name;
+    uint16_t type;
+    uint32_t ttl;
+    string data_str; // ip for A/AAAA or target for CNAME
+};
+
+bool parse_dns_response(const vector<uint8_t>& resp, vector<DNSAnswer>& answers, vector<string>& cnames) {
+    if (resp.size() < sizeof(DNSHeader)) return false;
+    const uint8_t* buf = resp.data();
+    size_t bufsize = resp.size();
+
+    // header
+    uint16_t id = (buf[0] << 8) | buf[1];
+    uint16_t flags = (buf[2] << 8) | buf[3];
+    uint16_t qdcount = (buf[4] << 8) | buf[5];
+    uint16_t ancount = (buf[6] << 8) | buf[7];
+    // skip nscount and arcount for now
+
+    size_t offset = sizeof(DNSHeader);
+
+    // skip question section (qdcount times)
+    for (int i = 0; i < qdcount; ++i) {
+        string qname = decode_name(buf, bufsize, offset);
+        if (offset + 4 > bufsize) return false;
+        uint16_t qtype = (buf[offset] << 8) | buf[offset+1];
+        uint16_t qclass = (buf[offset+2] << 8) | buf[offset+3];
+        offset += 4;
+    }
+
+    // parse answers
+    for (int i = 0; i < ancount; ++i) {
+        string name = decode_name(buf, bufsize, offset);
+        if (offset + 10 > bufsize) return false;
+        uint16_t type = (buf[offset] << 8) | buf[offset+1];
+        uint16_t cls  = (buf[offset+2] << 8) | buf[offset+3];
+        uint32_t ttl  = (buf[offset+4] << 24) | (buf[offset+5] << 16) | (buf[offset+6] << 8) | buf[offset+7];
+        uint16_t rdlen = (buf[offset+8] << 8) | buf[offset+9];
+        offset += 10;
+
+        if (offset + rdlen > bufsize) return false;
+
+        if (type == 1 && rdlen == 4) { // A
+            char ipbuf[INET_ADDRSTRLEN];
+            const uint8_t* a = buf + offset;
+            sprintf_s(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u", a[0], a[1], a[2], a[3]);
+            DNSAnswer ans;
+            ans.name = name;
+            ans.type = type;
+            ans.ttl = ttl;
+            ans.data_str = std::string(ipbuf);
+            answers.push_back(ans);
+        } else if (type == 28 && rdlen == 16) { // AAAA
+            char ipbuf[INET6_ADDRSTRLEN];
+            // inet_ntop not directly available for raw buffer easily, format manually using WSAAddressToString
+            SOCKADDR_IN6 sa6;
+            memset(&sa6, 0, sizeof(sa6));
+            sa6.sin6_family = AF_INET6;
+            memcpy(&sa6.sin6_addr, buf + offset, 16);
+            DWORD iplen = INET6_ADDRSTRLEN;
+            char outbuf[INET6_ADDRSTRLEN] = {0};
+            // use WSAAddressToStringA
+            SOCKADDR_STORAGE ss;
+            memset(&ss, 0, sizeof(ss));
+            ((SOCKADDR_IN6*)&ss)->sin6_family = AF_INET6;
+            memcpy(&((SOCKADDR_IN6*)&ss)->sin6_addr, buf + offset, 16);
+            WSAAddressToStringA((LPSOCKADDR)&ss, sizeof(SOCKADDR_IN6), NULL, outbuf, &iplen);
+            DNSAnswer ans;
+            ans.name = name;
+            ans.type = type;
+            ans.ttl = ttl;
+            ans.data_str = std::string(outbuf);
+            answers.push_back(ans);
+        } else if (type == 5) { // CNAME
+            size_t tmp_offset = offset;
+            string cname = decode_name(buf, bufsize, tmp_offset);
+            cnames.push_back(cname);
+            DNSAnswer ans;
+            ans.name = name;
+            ans.type = type;
+            ans.ttl = ttl;
+            ans.data_str = cname;
+            answers.push_back(ans);
+        } else {
+            // ignore other types
+        }
+
+        offset += rdlen;
+    }
+
+    return true;
+}
+
+/* Send a DNS query to server and get response (blocking, simple) */
+bool send_dns_query_udp(const string& server_ip, const string& qname, vector<uint8_t>& out_resp, int qtype=255, int timeout_ms=2000) {
+    // server_ip currently handled for IPv4 strings
+    sockaddr_in serv{};
+    serv.sin_family = AF_INET;
+    serv.sin_port = htons(53);
+    if (inet_pton(AF_INET, server_ip.c_str(), &serv.sin_addr) != 1) {
+        cerr << "Invalid DNS server IP: " << server_ip << "\n";
+        return false;
+    }
+
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) {
+        cerr << "socket() failed: " << WSAGetLastError() << "\n";
+        return false;
+    }
+
+    // build query (id random)
+    uint16_t id = (uint16_t)(rand() & 0xFFFF);
+    vector<uint8_t> query = build_dns_query(qname, (uint16_t)qtype, id);
+
+    // send
+    int sent = sendto(s, (const char*)query.data(), (int)query.size(), 0, (sockaddr*)&serv, sizeof(serv));
+    if (sent == SOCKET_ERROR) {
+        cerr << "sendto() failed: " << WSAGetLastError() << "\n";
+        closesocket(s);
+        return false;
+    }
+
+    // set timeout
+    DWORD tv = timeout_ms;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+
+    // receive (single read)
+    out_resp.resize(4096);
+    sockaddr_in from{};
+    int fromlen = sizeof(from);
+    int rec = recvfrom(s, (char*)out_resp.data(), (int)out_resp.size(), 0, (sockaddr*)&from, &fromlen);
+    if (rec == SOCKET_ERROR) {
+        int e = WSAGetLastError();
+        if (e == WSAETIMEDOUT) {
+            cerr << "DNS query timed out\n";
+        } else {
+            cerr << "recvfrom() failed: " << e << "\n";
+        }
+        closesocket(s);
+        return false;
+    }
+    out_resp.resize(rec);
+    closesocket(s);
+    return true;
+}
+
+/* High level: resolve name via raw DNS, follow CNAME chain (depth-limited) */
+bool raw_resolve_follow(const string& qname, const string& dns_server, vector<DNSAnswer>& final_answers, int depth=0) {
+    if (depth > 6) {
+        cerr << "CNAME chain too deep\n";
+        return false;
+    }
+
+    vector<uint8_t> resp;
+    if (!send_dns_query_udp(dns_server, qname, resp, 255)) { // 255 ANY
+        return false;
+    }
+
+    vector<DNSAnswer> answers;
+    vector<string> cnames;
+    if (!parse_dns_response(resp, answers, cnames)) {
+        cerr << "Failed to parse DNS response\n";
+        return false;
+    }
+
+    // collect A/AAAA for this name
+    for (auto &a : answers) {
+        if (a.type == 1 || a.type == 28) {
+            final_answers.push_back(a);
+        }
+    }
+
+    // if we already have IPs, return them (also include any CNAMEs for info)
+    if (!final_answers.empty()) {
+        for (auto &a : answers) {
+            if (a.type == 5) final_answers.push_back(a);
+        }
+        return true;
+    }
+
+    // if no direct A/AAAA but CNAMEs exist, follow the first CNAME target
+    if (!cnames.empty()) {
+        // choose the first CNAME (common case)
+        string target = cnames[0];
+        // add the CNAME as info
+        DNSAnswer cnameAns;
+        cnameAns.name = qname;
+        cnameAns.type = 5;
+        cnameAns.ttl = 0;
+        cnameAns.data_str = target;
+        final_answers.push_back(cnameAns);
+
+        return raw_resolve_follow(target, dns_server, final_answers, depth + 1);
+    }
+
+    // nothing found
+    return true; // success but no answers
+}
+
+
+
+
 int main(int argc, char* argv[]) {
       if (argc < 2) {
         print_usage();
@@ -100,6 +428,42 @@ int main(int argc, char* argv[]) {
         }
         string ip = argv[2];
         do_reverse_lookup(ip);
+        WSACleanup();
+        return 0;
+    }
+
+
+     if (first == "--raw") {
+        if (argc < 3) {
+            cerr << "Error: --raw requires a hostname\n";
+            print_usage();
+            WSACleanup();
+            return 1;
+        }
+        string qname = argv[2];
+        string dns_server = "8.8.8.8";
+        if (argc >= 4) dns_server = argv[3];
+
+        cout << "Raw DNS query for: " << qname << " via " << dns_server << "\n";
+        vector<DNSAnswer> out;
+        bool ok = raw_resolve_follow(qname, dns_server, out, 0);
+        if (!ok) {
+            cerr << "raw_resolve_follow failed\n";
+            WSACleanup();
+            return 1;
+        }
+        // Print results
+        for (auto &a : out) {
+            if (a.type == 1) {
+                cout << "A   " << a.data_str << " (name: " << a.name << ")\n";
+            } else if (a.type == 28) {
+                cout << "AAAA " << a.data_str << " (name: " << a.name << ")\n";
+            } else if (a.type == 5) {
+                cout << "CNAME " << a.name << " -> " << a.data_str << "\n";
+            } else {
+                // ignore others
+            }
+        }
         WSACleanup();
         return 0;
     }
