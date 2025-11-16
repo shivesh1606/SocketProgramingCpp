@@ -1,156 +1,287 @@
-g++ resolver.cpp -o resolver.exe -lws2_32
-After 3rd commit
+# 🧭 C++ DNS Resolver (WinSock + Raw DNS Client)
+A modern educational DNS resolver written in C++ for Windows.
+
+## ✨ Core Features
+- ✔ OS-level resolution (`getaddrinfo`)
+- ✔ Reverse DNS (IP → Domain)
+- ✔ Raw DNS queries (UDP packets)
+- ✔ A/AAAA/CNAME/MX (more coming soon)
+- ✔ Custom DNS server selection (1.1.1.1 / 8.8.8.8 / local resolver)
+
+## 📚 Table of Contents
+- [Core Features](#-core-features)
+- [Usage](#-usage)
+- [Detailed Features](#-detailed-features)
+- [How it Works](#-how-it-works)
+- [Build Instructions](#-build-instructions)
+- [Supported DNS Record Types](#-supported-dns-record-types)
+- [Future Roadmap](#-future-roadmap)
+- [Educational Value](#-educational-value)
+- [Key Project Milestones](#-key-project-milestones)
+- [Author](#-author)
+
+---
+
+## 📂 Usage
+
+### 🔹 Basic Lookup
+Uses the standard OS-level `getaddrinfo` function.
+```bash
+resolver google.com
+```
+```bash
+Output:
+IPv4: 142.250.193.46
+Socket: Stream (TCP)
+Protocol: TCP
+CNAME: google.com
+```
+
+🔹 Reverse DNS Lookup
+Converts an IP address back to its associated hostname (PTR record).
+```bash
+resolver --reverse 8.8.8.8
+```
+```bash
+Output:
+Reverse lookup for 8.8.8.8 -> dns.google
+```
+🔹 Raw DNS Query
+Sends a manually constructed DNS packet over UDP to a specific server.
+```bash
+./resolver.exe --raw www.google.com 1.1.1.1 
+```
+```bash
+Output Example:
+Raw DNS query for: www.iitkgp.ac.in via 1.1.1.1
+A: 203.110.240.87
+CNAME: www.iitkgp.ac.in
+```
+
+## 📌 Detailed Features
+1. Hostname → IP Resolver (getaddrinfo)
+IPv4 + IPv6 support
+
+Shows socket type (TCP/UDP/RAW)
+
+Shows protocol (TCP/UDP/ICMP)
+
+Supports fetching OS-provided canonical name (AI_CANONNAME)
+
+2. Reverse Lookup (PTR)
+Converts IP → domain using getnameinfo()
+
+Supports both IPv4 & IPv6
+
+Graceful fallback if PTR record does not exist
+
+3. Raw DNS Query Engine
+You manually build DNS packets:
+
+Create DNS header
+
+Encode QNAME
+
+Send UDP packet
+
+Receive DNS response
+
+Parse ALL answers, including compressed names (0xC0xx)
+
+Supports:
+
+A (IPv4)
+
+AAAA (IPv6)
+
+CNAME
+
+MX (Mail Exchange)
+
+4. Select Your Own DNS Server
+Use an optional argument to specify a resolver:
+
+```bash
+resolver --raw google.com 1.1.1.1
+resolver --raw github.com 8.8.8.8
+```
+
+Useful for debugging, bypassing ISP cache, or comparing resolvers.
+
+## 🧠 How it Works
+How DNS Works (Simplified)
+DNS is a global phonebook.
+
+Forward Lookup: You know the name → want the number
+
+Example: google.com → 142.250.193.46
+
+Reverse Lookup: You know the number → want the name
+
+Example: 8.8.8.8 → dns.google
+
+(Only works if the owner created a PTR record)
+
+⚙ How getaddrinfo() Works Internally
+When you call getaddrinfo("google.com", NULL, &hints, &result);, this does not contact Google directly. Instead, the flow is:
+
+```bash
+Your Program
+    ↓
+Windows DNS Resolver
+    ↓
+Router DNS (e.g., 192.168.29.1)
+    ↓
+ISP / Public DNS (1.1.1.1 / 8.8.8.8)
+    ↓
+Authoritative Google DNS
+    ↓
+Returns A / AAAA / CNAME
+```
+
+This is why resolver --raw google.com 1.1.1.1 is a useful debugging tool.
+
+🏷 Understanding CNAME
+CNAME = Canonical Name = a domain alias.
+
+Example: www.microsoft.com → www.microsoft.com-cdn.azureedge.net
+
+Benefits:
+
+Load balancing
+
+CDN routing
+
+Easy backend migration
+
+“www” aliasing
+
+💡 DNS Rule: A root domain (example.com) cannot have a CNAME record; it must have an A or AAAA record.
+
+📬 What is an MX Record?
+MX = Mail Exchange = an email routing record.
+
+Example: gmail.com
+
+10 alt1.aspmx.l.google.com
+
+20 alt2.aspmx.l.google.com
+
+It includes:
+
+Priority (lower number = more preferred)
+
+Mail server hostname
+
+## 🛠 Build Instructions
+Requires Windows (MinGW) and linking two key libraries.
+
+```bash
 g++ resolver.cpp -o resolver.exe -lws2_32 -ldnsapi
+```
 
-Your program  
-  → getaddrinfo()
-       → Windows DNS Resolver
-            → Router DNS (192.168.29.1)
-                 → ISP DNS / External DNS
-                      → Authoritative Google DNS
-                           → returns A and AAAA records
+Libraries Required:
 
-✔️ So reverse DNS =
+ws2_32.lib: WinSock networking (sockets, UDP, TCP).
 
-Look up the PTR record for an IP inside the special in-addr.arpa zone.
+dnsapi.lib: Windows DNS API (used for specific queries like MX, NS, TXT).
 
-Real simple analogy
+## 🧪 Supported DNS Record Types
+Record,Meaning,Supported?
+A,IPv4,✔
+AAAA,IPv6,✔
+CNAME,Canonical Name,✔
+MX,Mail Exchange,✔
+PTR,Reverse DNS,✔ (via getnameinfo)
+NS,Name Server,🔜 Coming
+TXT,"Domain Text (SPF, DKIM)",🔜 Coming
+SOA,Start of Authority,🔜 Coming
 
-Think of DNS like a phonebook:
 
-Forward lookup
+## 🚀 Future Roadmap
+🔹 Phase 1 (Next)
+NS records
 
-You know a person’s name → you get their phone number
-✔️ Everyone has one
+TXT (SPF/DKIM)
 
-Reverse lookup
+SOA
 
-You have a phone number → you ask: “Whose number is this?”
-❌ Works only if they added their name to the reverse phonebook
+Human-readable flags (AA, RD, RA, TC)
 
-Most people don’t.
+🔹 Phase 2
+--json output mode
 
+--trace (to mimic dig +trace)
 
+Colored terminal output
 
-🎯 Long Answer (Clear Explanation)
+🔹 Phase 3 (Advanced)
+DNSSEC awareness
 
-When you call:
+TCP fallback (for large responses)
 
-getaddrinfo("google.com", NULL, &hints, &result);
+🔹 Phase 4 (Expert)
+Build a local DNS server:
 
+Forward queries
 
-You are NOT connecting to Google.
-You are NOT asking Google which protocols it supports.
+Cache responses
 
-You are simply asking your OS:
+Support A/AAAA/CNAME locally
 
-“Hey OS, if I want to connect to google.com, what IPs and socket types/protocols should I use?”
+## 📚 Educational Value
+This project is an excellent tool for learning:
 
+Real packet encoding/decoding
 
-🔥 Let’s simplify with a real-world analogy
+DNS protocol internals
 
-Imagine you want to visit someone’s house.
+WinSock networking
 
-You ask someone:
+UDP sockets
 
-“How do I reach this house?”
+Recursive resolution
 
-They reply:
+CNAME chains
 
-Here is the address (IP)
+MX parsing
 
-Use a car (TCP)
+String compression in protocols
 
-Take a highway (stream socket)
+It is highly recommended for:
 
-This does not mean the person living inside uses a car.
-It means you must use a car to go there.
+Network Engineers
 
-Same with networking:
+SRE/DevOps
 
-IP = house address
+Backend Developers
 
-Socket type = vehicle type
+Low-level C++ Programmers
 
-Protocol = type of road
+Cybersecurity Students
 
-getaddrinfo() is telling you how to reach the server, not what the server internally uses.
+## 📜 Key Project Milestones
+1. MX Records Added
 
+commit 2ca32c9cf6e30c8ad455e8f94bdd252b5f52e839 MX parsing, preference extraction.
 
-🧠 Why does nslookup show more info?
+2. CNAME Resolution (Raw)
 
-Because nslookup is a DNS client.
+commit b79089f82601c89d23dee39ae0fb4a7ac125bee6 Recursive CNAME following.
 
-It knows:
+3. Socket Type + Protocol Detection
 
-DNS queries are made via UDP
+commit 95feebed49cd7f5a4755257d5a42d932451fc9a5 Displays TCP/UDP/ICMP info for each returned IP.
 
-DNS fallback uses TCP if packet is large
+4. Reverse Lookup + Full Resolver
 
-❗ Notice something important:
+commit 81964b8f7a68a64eb89246b6d2899485a787c70f Supports PTR via getnameinfo.
 
-The server (Google, Cloudflare, etc.) does not tell you this directly.
+## 🧑‍💻 Author
+Shivesh Chaturvedi
 
-Your OPERATING SYSTEM knows:
+B.Tech, IIT Kharagpur
 
-“DNS = UDP”
+SRE + Software Developer
 
-“HTTP = TCP”
-
-“SSH = TCP”
-
-“Ping = raw ICMP”
-
-And based on these rules, OS gives you the right connection recipe.
-
-CNAME Resolution (Canonical Name)
-
-When you visit:
-
-www.youtube.com
-
-
-The DNS server may internally map it to another domain:
-
-youtube-ui.l.google.com
-
-
-This "true" domain is called the canonical name (CNAME).
-
-Your resolver can print this using:
-
-AI_CANONNAME flag
-
-reading ai_canonname field
-
-
-Important:
-Out existing code uses getaddrinfo() → this already handles CNAME internally, so you never actually see the CNAME.
-So we need to use Raw Dns query function
-
-
-🚀 6. So what purpose does CNAME solve?
-✔ Makes domain point to a dynamic backend
-✔ Allows cloud providers to rotate IPs
-✔ Lets you use CDNs easily
-✔ Lets you “alias” your domain to another
-✔ Reduces maintenance
-✔ Allows www to stay stable forever
-
-
-🏁 Summary in 4 Lines
-
-CNAME = nickname → tells DNS to look at another domain for the real location
-
-Used because cloud services change server IPs frequently
-
-www works because you added CNAME for www
-
-root domain doesn’t work because it needs an A/AAAA record, not CNAME
-
-
-👍 Summary
-Question	Answer
-Why does --raw take 3 args?	Because we specify the domain and the DNS server to ask.
-What is 1.1.1.1?	Cloudflare's public DNS server.
-Why specify DNS server?	To test, debug, compare, bypass filters, or avoid cache.
+GitHub: shivesh1606
