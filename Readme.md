@@ -173,8 +173,59 @@ Priority (lower number = more preferred)
 
 Mail server hostname
 
+What is NS Record?
+NS = Name Server Record
+⭐ 1. NS Record (Name Server Record)
+
+An NS record tells the world which DNS server is responsible for a domain.
+
+Example for facebook.com:
+
+a.ns.facebook.com
+b.ns.facebook.com
+c.ns.facebook.com
+d.ns.facebook.com
+
+
+These servers contain the real, original DNS data (A records, MX, TXT, etc).
+
+➡️ NS = “These are the official servers for this domain.”
 ## 🛠 Build Instructions
 Requires Windows (MinGW) and linking two key libraries.
+
+⭐ 2. Authoritative vs Non-authoritative DNS
+✅ Authoritative DNS
+
+Comes directly from the domain’s official name servers (listed in NS records)
+
+Contains the real truth about the domain
+
+No caching — answers are generated from the zone file
+
+Example:
+
+nslookup facebook.com a.ns.facebook.com
+
+
+This is authoritative because you asked the official server.
+
+⚠️ Non-authoritative DNS
+
+Comes from your ISP resolver, Google DNS, Cloudflare DNS, etc.
+
+That resolver cached the answer earlier.
+
+Faster, but not guaranteed to be the newest.
+
+Example:
+
+nslookup facebook.com
+
+
+Here your ISP's DNS server is replying → non-authoritative.
+
+➡️ Non-authoritative = cached
+➡️ Authoritative = original source
 
 ```bash
 g++ resolver.cpp -o resolver.exe -lws2_32 -ldnsapi

@@ -288,7 +288,20 @@ bool parse_dns_response(const vector<uint8_t>& resp, vector<DNSAnswer>& answers,
             ans.ttl = ttl;
             ans.data_str = cname;
             answers.push_back(ans);
-        } else {
+        } 
+        else if(type ==2){ // NS
+            size_t tmp_offset = offset;
+            string nsname = decode_name(buf, bufsize, tmp_offset);
+            // we can store NS records if needed
+            DNSAnswer ans;
+            ans.name = name;
+            ans.type = type;
+            ans.ttl = ttl;
+            ans.data_str = nsname;
+            answers.push_back(ans);
+
+        }
+        else {
             // ignore other types
         }
 
@@ -474,6 +487,40 @@ void resolve_mx(const std::string& domain) {
     DnsRecordListFree(pRecord, DnsFreeRecordList);
 }
 
+void resolve_ns(const std::string& domain) {
+    PDNS_RECORD pRecord = nullptr;
+    DNS_STATUS status;
+
+    status = DnsQuery_A(
+        domain.c_str(),
+        DNS_TYPE_NS,
+        DNS_QUERY_STANDARD,
+        NULL,
+        &pRecord,
+        NULL
+    );
+
+    if (status != 0) {
+        std::cerr << "NS lookup failed: " << status << "\n";
+        return;
+    }
+
+    std::cout << "[NS Records for " << domain << "]\n";
+
+    PDNS_RECORD p = pRecord;
+    while (p) {
+        if (p->wType == DNS_TYPE_NS) {
+            std::cout << "Nameserver : " << p->Data.NS.pNameHost << "\n";
+            std::cout << "TTL        : " << p->dwTtl << "\n";
+            std::cout << "-----------------------------\n";
+        }
+        p = p->pNext;
+    }
+
+    DnsRecordListFree(pRecord, DnsFreeRecordList);
+}
+
+
 int main(int argc, char* argv[]) {
       if (argc < 2) {
         print_usage();
@@ -530,7 +577,11 @@ int main(int argc, char* argv[]) {
                 cout << "AAAA " << a.data_str << " (name: " << a.name << ")\n";
             } else if (a.type == 5) {
                 cout << "CNAME " << a.name << " -> " << a.data_str << "\n";
-            } else {
+            }  else if (a.type == 2) {
+                cout << "NS   " << a.data_str << " (zone: " << a.name << ")"
+                     << " TTL: " << a.ttl << "\n";
+            }
+            else {
                 // ignore others
             }
         }
@@ -562,8 +613,11 @@ int main(int argc, char* argv[]) {
     void* addr;
     if (p->ai_family == AF_INET) {
         addr = &((sockaddr_in*)p->ai_addr)->sin_addr;
-    } else {
+    } else if (p->ai_family == AF_INET6)  {
         addr = &((sockaddr_in6*)p->ai_addr)->sin6_addr;
+    }
+    else {
+        continue;
     }
 
     inet_ntop(p->ai_family, addr, ipStr, sizeof(ipStr));
@@ -573,10 +627,15 @@ int main(int argc, char* argv[]) {
     std::cout << "  Protocol    : " << protocolToStr(p->ai_protocol) << "\n";
     std::cout << "---------------------------------------\n";
     }
-    resolve_mx(hostname);
+
 
 
     freeaddrinfo(result);
+    cout << "\nPerforming MX lookup for " << hostname << "...\n";
+    resolve_mx(hostname);
+    // Also perform NS lookup for the given domain
+    cout << "\nPerforming NS lookup for " << hostname << "...\n";
+    resolve_ns(hostname);
     WSACleanup();
     return 0;
 }
